@@ -7,12 +7,12 @@
     This script automates the COMPLETE Apache HBase installation on Windows, including:
     1. Pre-flight checks (Java 8, Hadoop, HADOOP_HOME, JAVA_HOME validation)
     2. HBase 2.6.5 download and extraction (with SHA-512 verification)
-    3. Environment variables configuration (HBASE_HOME, PATH)
+    3. Environment variables configuration (HBASE_HOME, JAVA_HOME, PATH)
     4. hbase-env.cmd configuration (JAVA_HOME short path fix)
     5. hbase-site.xml configuration (standalone + HDFS-backed modes)
     6. Windows .cmd launcher shim generation (hbase.cmd, start-hbase.cmd, stop-hbase.cmd)
-    7. Data/log directory creation
-    8. HBase Master startup test (optional)
+    7. HDFS directory creation (/hbase, /tmp/hbase) when HDFS is running
+    8. Windows Firewall rules for HBase ports
 
 .NOTES
     Author:  VANSH RANA
@@ -77,12 +77,28 @@ foreach ($_c in $_hadoopCandidates) {
 }
 if (-not $HADOOP_HOME) {
     Write-Host "  [..] Scanning C: for hadoop.cmd..." -ForegroundColor DarkYellow
+    # Step 1: look inside any folder named hadoop/Hadoop/HADOOP at C:\ root
     foreach ($_fn in @("hadoop", "Hadoop", "HADOOP")) {
         if (Test-Path "C:\$_fn") {
             $found = Get-ChildItem "C:\$_fn" -Filter "hadoop.cmd" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($found) { $HADOOP_HOME = Split-Path $found.DirectoryName -Parent; break }
         }
     }
+    # Step 2: walk 2 levels deep under C:\ (covers C:\tools\hadoop, C:\Program Files\Hadoop, etc.)
+    if (-not $HADOOP_HOME) {
+        $topDirs = Get-ChildItem -Path "C:\" -Directory -ErrorAction SilentlyContinue
+        foreach ($_top in $topDirs) {
+            $found = Get-ChildItem -Path $_top.FullName -Filter "hadoop.cmd" -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $HADOOP_HOME = Split-Path $found.DirectoryName -Parent; break }
+            $subDirs = Get-ChildItem -Path $_top.FullName -Directory -ErrorAction SilentlyContinue
+            foreach ($_sub in $subDirs) {
+                $found = Get-ChildItem -Path $_sub.FullName -Filter "hadoop.cmd" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($found) { $HADOOP_HOME = Split-Path $found.DirectoryName -Parent; break }
+            }
+            if ($HADOOP_HOME) { break }
+        }
+    }
+    if ($HADOOP_HOME) { Write-Host "  [OK] Auto-detected Hadoop at: $HADOOP_HOME" -ForegroundColor Green }
 }
 
 $TEMP_DIR = "$env:TEMP\hbase-install"
@@ -357,7 +373,7 @@ else {
 }
 
 # Create temp/data directories
-foreach ($d in @($TEMP_DIR, $HBASE_DATA_DIR, "$HBASE_DATA_DIR\logs", "$HBASE_DATA_DIR\tmp", "$HBASE_DATA_DIR\root")) {
+foreach ($d in @($TEMP_DIR, $HBASE_DATA_DIR, "$HBASE_DATA_DIR\logs", "$HBASE_DATA_DIR\tmp", "$HBASE_DATA_DIR\root", "$HBASE_DATA_DIR\zookeeper")) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 }
 
@@ -430,13 +446,14 @@ if ($doDownload) {
     if (Get-Command tar.exe -ErrorAction SilentlyContinue) {
         Write-Host "    Using built-in tar.exe..." -ForegroundColor Gray
         & tar.exe -xzf "$hbaseTarGz" -C "$extractTemp" 2>$null
+        $tarExit = $LASTEXITCODE
         $chkFolder = Get-ChildItem $extractTemp -Directory | Where-Object { $_.Name -like "hbase-*" } | Select-Object -First 1
         if (-not $chkFolder) { $chkFolder = Get-ChildItem $extractTemp -Directory | Select-Object -First 1 }
-        if ($chkFolder -and (Test-Path "$($chkFolder.FullName)\bin\hbase")) {
+        if ($tarExit -eq 0 -and $chkFolder -and (Test-Path "$($chkFolder.FullName)\bin\hbase")) {
             $extracted = $true; Write-Success "Extracted using tar.exe"
         }
         else {
-            Write-Warn "tar.exe incomplete. Trying 7-Zip..."
+            Write-Warn "tar.exe incomplete (exit $tarExit). Trying 7-Zip..."
             cmd /c rmdir /s /q "$extractTemp" 2>$null
             New-Item -ItemType Directory -Path $extractTemp -Force | Out-Null
         }
@@ -463,6 +480,9 @@ if ($doDownload) {
                 if ($tarFile) {
                     & $7zExe x "$($tarFile.FullName)" -o"$extractTemp" -y | Out-Null
                     Remove-Item $tarFile.FullName -Force -ErrorAction SilentlyContinue
+                }
+                else {
+                    Write-Warn "    No .tar file found after gzip extraction. Archive may be corrupt."
                 }
                 $chkFolder = Get-ChildItem $extractTemp -Directory | Where-Object { $_.Name -like "hbase-*" } | Select-Object -First 1
                 if (-not $chkFolder) { $chkFolder = Get-ChildItem $extractTemp -Directory | Select-Object -First 1 }
@@ -505,24 +525,49 @@ Write-Step "2.1" "Setting HBASE_HOME system environment variable..."
 $env:HBASE_HOME = $INSTALL_DIR
 Write-Success "HBASE_HOME = $INSTALL_DIR"
 
-Write-Step "2.2" "Adding $INSTALL_DIR\bin to system PATH..."
+Write-Step "2.2" "Setting JAVA_HOME system environment variable..."
+[System.Environment]::SetEnvironmentVariable("JAVA_HOME", $javaHome, "Machine")
+$env:JAVA_HOME = $javaHome
+Write-Success "JAVA_HOME = $javaHome"
+
+Write-Step "2.3" "Adding $INSTALL_DIR\bin to system PATH..."
 $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+if (-not $machinePath) { $machinePath = "" }
 $hbaseBin = "$INSTALL_DIR\bin"
-if ($machinePath -notlike "*$hbaseBin*") {
+$machineEntries = ($machinePath -split ';') | ForEach-Object { $_.Trim() }
+if ($machineEntries -notcontains $hbaseBin) {
     [System.Environment]::SetEnvironmentVariable("Path", "$machinePath;$hbaseBin", "Machine")
     $env:Path = "$env:Path;$hbaseBin"
-    Write-Success "Added $hbaseBin to PATH"
+    Write-Success "Added $hbaseBin to system PATH"
 }
 else {
-    Write-Success "$hbaseBin is already in PATH"
+    Write-Success "$hbaseBin is already in system PATH"
+}
+
+Write-Step "2.4" "Updating user-level PATH (for non-admin terminals)..."
+$userPath = [System.Environment]::GetEnvironmentVariable("Path", "User")
+if (-not $userPath) { $userPath = "" }
+$userEntries = ($userPath -split ';') | ForEach-Object { $_.Trim() }
+if ($userEntries -notcontains $hbaseBin) {
+    if ($userPath) { $userPath = "$userPath;$hbaseBin" } else { $userPath = $hbaseBin }
+    [System.Environment]::SetEnvironmentVariable("Path", $userPath, "User")
+    Write-Success "Added $hbaseBin to user PATH"
+}
+else {
+    Write-Success "$hbaseBin is already in user PATH"
 }
 
 if ($HADOOP_HOME) {
-    Write-Step "2.3" "Setting HADOOP_HOME environment variable..."
+    Write-Step "2.5" "Setting HADOOP_HOME environment variable..."
     [System.Environment]::SetEnvironmentVariable("HADOOP_HOME", $HADOOP_HOME, "Machine")
     $env:HADOOP_HOME = $HADOOP_HOME
     Write-Success "HADOOP_HOME = $HADOOP_HOME"
 }
+
+# Refresh session PATH
+$machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+$userPath    = [System.Environment]::GetEnvironmentVariable("Path", "User")
+$env:Path = if ($userPath) { "$machinePath;$userPath" } else { $machinePath }
 
 # ============================================================================
 #  STEP 3: hbase-env.cmd CONFIGURATION
@@ -610,10 +655,10 @@ if ($HADOOP_HOME) {
     <description>HBase root directory on HDFS. Must match Hadoop NameNode port.</description>
   </property>
 
-  <!-- Run in pseudo-distributed mode (single JVM, HDFS storage) -->
+  <!-- Pseudo-distributed: each daemon in its own JVM, data on HDFS -->
   <property>
     <name>hbase.cluster.distributed</name>
-    <value>false</value>
+    <value>true</value>
   </property>
 
   <!-- Temporary working directory -->
@@ -740,7 +785,7 @@ if not defined JAVA_HOME  set JAVA_HOME=$javaHomeShort
 set HBASE_CONF_DIR=%HBASE_HOME%\conf
 set HBASE_LIB_DIR=%HBASE_HOME%\lib
 
-@rem Source hbase-env.cmd first (sets JAVA_HOME, HBASE_OPTS etc.)
+@rem Source hbase-env.cmd first (sets JAVA_HOME, JAVA_HEAP_MAX, base HBASE_OPTS etc.)
 if exist "%HBASE_CONF_DIR%\hbase-env.cmd" call "%HBASE_CONF_DIR%\hbase-env.cmd"
 
 @rem Shell classpath: client-facing-thirdparty FIRST so correct JLine wins
@@ -750,8 +795,9 @@ set HBASE_SHELL_CP=%HBASE_CONF_DIR%;%HBASE_LIB_DIR%\client-facing-thirdparty\*;%
 @rem Full classpath for master/regionserver (includes zkcli for ZooKeeper CLI)
 set HBASE_FULL_CP=%HBASE_CONF_DIR%;%HBASE_LIB_DIR%\client-facing-thirdparty\*;%HBASE_LIB_DIR%\*;%HBASE_LIB_DIR%\shaded-clients\*;%HBASE_LIB_DIR%\zkcli\*;%HBASE_LIB_DIR%\trace\*;%HBASE_LIB_DIR%\ruby\*
 
-@rem HBase JVM options
-set HBASE_OPTS=-Djava.net.preferIPv4Stack=true
+@rem Apply heap from hbase-env.cmd (JAVA_HEAP_MAX=-Xmx1024m) then append log/identity opts
+@rem NOTE: use %HBASE_OPTS% (append) not a bare = (reset) so env.cmd opts are preserved
+set HBASE_OPTS=%HBASE_OPTS% %JAVA_HEAP_MAX%
 set HBASE_OPTS=%HBASE_OPTS% -Dhbase.log.dir=%HBASE_HOME%\logs
 set HBASE_OPTS=%HBASE_OPTS% -Dhbase.log.file=hbase.log
 set HBASE_OPTS=%HBASE_OPTS% -Dhbase.home.dir=%HBASE_HOME%
@@ -777,7 +823,13 @@ if "%COMMAND%"=="classpath"    goto :do_classpath
 goto :do_shell
 
 :do_shell
+set HBASE_SHELL_JAR=
 for %%j in (%HBASE_LIB_DIR%\hbase-shell-*.jar) do set HBASE_SHELL_JAR=%%j
+if not defined HBASE_SHELL_JAR (
+    echo [ERROR] hbase-shell-*.jar not found in %HBASE_LIB_DIR%
+    echo         Is HBase installed at %HBASE_HOME% ?
+    exit /b 1
+)
 "%JAVA_HOME%\bin\java" -cp "%HBASE_SHELL_CP%" %HBASE_OPTS% -Xmx512m ^
   org.jruby.Main -X+O "jar:file:%HBASE_SHELL_JAR%!/jar-bootstrap.rb" %2 %3 %4 %5
 goto :eof
@@ -820,7 +872,9 @@ set HBASE_CLASSPATH=%HBASE_CONF_DIR%;%HBASE_LIB_DIR%\*;%HBASE_LIB_DIR%\client-fa
 
 if not exist "%HBASE_HOME%\logs" mkdir "%HBASE_HOME%\logs"
 
-set HBASE_OPTS=-Djava.net.preferIPv4Stack=true
+@rem Apply heap from hbase-env.cmd (JAVA_HEAP_MAX=-Xmx1024m) then append log/identity opts
+@rem NOTE: use %HBASE_OPTS% (append) not a bare = (reset) so env.cmd opts are preserved
+set HBASE_OPTS=%HBASE_OPTS% %JAVA_HEAP_MAX%
 set HBASE_OPTS=%HBASE_OPTS% -Dhbase.log.dir=%HBASE_HOME%\logs
 set HBASE_OPTS=%HBASE_OPTS% -Dhbase.log.file=hbase-master.log
 set HBASE_OPTS=%HBASE_OPTS% -Dhbase.home.dir=%HBASE_HOME%
@@ -884,10 +938,70 @@ foreach ($f in $alreadyInstalled) {
 }
 
 # ============================================================================
-#  STEP 6: WINDOWS FIREWALL RULES
+#  STEP 6: HDFS DIRECTORIES FOR HBASE
 # ============================================================================
 
-Write-Banner "STEP 6: Windows Firewall Rules"
+Write-Banner "STEP 6: HDFS Directories for HBase"
+
+if ($HADOOP_HOME) {
+    Write-Host "  Checking HDFS availability..." -ForegroundColor Gray
+    $hdfsReady = $false
+    try {
+        & "$HADOOP_HOME\bin\hdfs.cmd" dfs -ls / 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $safeModeOut = (& "$HADOOP_HOME\bin\hdfs.cmd" dfsadmin -safemode get 2>&1) -join " "
+            if ($safeModeOut -match 'Safe mode is OFF') {
+                $hdfsReady = $true
+                Write-Success "HDFS is running and safe mode is OFF"
+            }
+            else {
+                Write-Warn "HDFS is in safe mode. Skipping HDFS directory creation."
+            }
+        }
+        else {
+            Write-Warn "HDFS not reachable (exit $LASTEXITCODE). Skipping HDFS directory creation."
+        }
+    }
+    catch {
+        Write-Warn "Could not connect to HDFS: $_"
+    }
+
+    if ($hdfsReady) {
+        # Set HADOOP_CLASSPATH so HBase can talk to HDFS
+        $env:HADOOP_CLASSPATH = (& "$HADOOP_HOME\bin\hadoop.cmd" classpath 2>$null) |
+            Where-Object { $_ } | Select-Object -Last 1
+
+        Write-Step "6.1" "Creating /hbase on HDFS..."
+        & "$HADOOP_HOME\bin\hdfs.cmd" dfs -mkdir -p /hbase 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Warn "hdfs mkdir /hbase failed (exit $LASTEXITCODE) - run manually after HDFS starts" }
+        & "$HADOOP_HOME\bin\hdfs.cmd" dfs -chmod 755 /hbase 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Warn "hdfs chmod /hbase failed (exit $LASTEXITCODE)" }
+        else { Write-Success "HDFS /hbase ready (chmod 755)" }
+
+        Write-Step "6.2" "Creating /tmp/hbase on HDFS..."
+        & "$HADOOP_HOME\bin\hdfs.cmd" dfs -mkdir -p /tmp/hbase 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Warn "hdfs mkdir /tmp/hbase failed (exit $LASTEXITCODE) - run manually after HDFS starts" }
+        & "$HADOOP_HOME\bin\hdfs.cmd" dfs -chmod 1777 /tmp/hbase 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Warn "hdfs chmod /tmp/hbase failed (exit $LASTEXITCODE)" }
+        else { Write-Success "HDFS /tmp/hbase ready (chmod 1777)" }
+    }
+    else {
+        Write-Warn "Start HDFS first, then run these commands manually:"
+        Write-Host "    hdfs dfs -mkdir -p /hbase" -ForegroundColor Cyan
+        Write-Host "    hdfs dfs -chmod 755 /hbase" -ForegroundColor Cyan
+        Write-Host "    hdfs dfs -mkdir -p /tmp/hbase" -ForegroundColor Cyan
+        Write-Host "    hdfs dfs -chmod 1777 /tmp/hbase" -ForegroundColor Cyan
+    }
+}
+else {
+    Write-Success "Standalone mode - no HDFS directories needed"
+}
+
+# ============================================================================
+#  STEP 7: WINDOWS FIREWALL RULES
+# ============================================================================
+
+Write-Banner "STEP 7: Windows Firewall Rules"
 
 $firewallPorts = @(
     @{ Port = 16000; Name = "HBase-Master-RPC"; Description = "HBase Master RPC" },
@@ -915,16 +1029,15 @@ foreach ($fw in $firewallPorts) {
 }
 
 # ============================================================================
-#  STEP 7: VERIFICATION
+#  STEP 8: VERIFICATION
 # ============================================================================
 
-Write-Banner "STEP 7: Installation Verification"
+Write-Banner "STEP 8: Installation Verification"
 
 $allGood = $true
 
 # Check binaries exist
 $checks = @(
-    @{ Path = "$INSTALL_DIR\bin\hbase"; Label = "hbase shell script" },
     @{ Path = "$INSTALL_DIR\bin\hbase.cmd"; Label = "hbase.cmd launcher" },
     @{ Path = "$INSTALL_DIR\bin\start-hbase.cmd"; Label = "start-hbase.cmd" },
     @{ Path = "$INSTALL_DIR\bin\stop-hbase.cmd"; Label = "stop-hbase.cmd" },
@@ -952,8 +1065,17 @@ else {
     Write-Warn "HBASE_HOME env var not confirmed. Current value: $hbaseHomeEnv"
 }
 
+$javaHomeEnv = [System.Environment]::GetEnvironmentVariable("JAVA_HOME", "Machine")
+if ($javaHomeEnv -and (Test-Path "$javaHomeEnv\bin\java.exe")) {
+    Write-Success "JAVA_HOME env var: OK ($javaHomeEnv)"
+}
+else {
+    Write-Warn "JAVA_HOME env var missing or invalid. Current value: $javaHomeEnv"
+}
+
 $systemPath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
-if ($systemPath -like "*$INSTALL_DIR\bin*") {
+$pathEntries = ($systemPath -split ';') | ForEach-Object { $_.Trim() }
+if ($pathEntries -contains "$INSTALL_DIR\bin") {
     Write-Success "PATH contains HBase bin: OK"
 }
 else {
@@ -961,7 +1083,7 @@ else {
 }
 
 # Check data directories
-foreach ($d in @($HBASE_DATA_DIR, "$HBASE_DATA_DIR\logs", "$HBASE_DATA_DIR\tmp", "$HBASE_DATA_DIR\root")) {
+foreach ($d in @($HBASE_DATA_DIR, "$HBASE_DATA_DIR\logs", "$HBASE_DATA_DIR\tmp", "$HBASE_DATA_DIR\root", "$HBASE_DATA_DIR\zookeeper")) {
     if (Test-Path $d) { Write-Success "Data dir: $d" }
     else { Write-Warn "Data dir missing: $d" }
 }
@@ -992,34 +1114,50 @@ if ($HADOOP_HOME) {
     Write-Host "       start-dfs.cmd" -ForegroundColor DarkCyan
     Write-Host "       start-yarn.cmd" -ForegroundColor DarkCyan
     Write-Host ""
-    Write-Host "  2. Create HBase directory on HDFS:" -ForegroundColor White
-    Write-Host "       hadoop fs -mkdir -p /hbase" -ForegroundColor DarkCyan
-    Write-Host "       hadoop fs -chmod 755 /hbase" -ForegroundColor DarkCyan
+    Write-Host "  2. Verify /hbase exists on HDFS (auto-created if HDFS was running):" -ForegroundColor White
+    Write-Host "       hadoop fs -ls /hbase" -ForegroundColor DarkCyan
     Write-Host ""
     Write-Host "  3. Start HBase:" -ForegroundColor White
+    Write-Host "       cd $INSTALL_DIR\bin" -ForegroundColor DarkCyan
+    Write-Host "       .\start-hbase.cmd" -ForegroundColor DarkCyan
+    Write-Host ""
+    Write-Host "  4. Open HBase Shell:" -ForegroundColor White
+    Write-Host "       .\hbase.cmd shell" -ForegroundColor DarkCyan
+    Write-Host ""
+    Write-Host "  5. HBase Master Web UI:" -ForegroundColor White
+    Write-Host "       http://localhost:16010" -ForegroundColor DarkCyan
+    Write-Host ""
+    Write-Host "  6. Quick test in HBase Shell:" -ForegroundColor White
+    Write-Host "       hbase> status" -ForegroundColor DarkCyan
+    Write-Host "       hbase> create 'test', 'cf'" -ForegroundColor DarkCyan
+    Write-Host "       hbase> put 'test', 'row1', 'cf:a', 'value1'" -ForegroundColor DarkCyan
+    Write-Host "       hbase> scan 'test'" -ForegroundColor DarkCyan
+    Write-Host "       hbase> exit" -ForegroundColor DarkCyan
+    Write-Host ""
+    Write-Host "  7. Stop HBase:" -ForegroundColor White
+    Write-Host "       .\stop-hbase.cmd" -ForegroundColor DarkCyan
 }
 else {
     Write-Host "  1. Start HBase (standalone mode):" -ForegroundColor White
+    Write-Host "       cd $INSTALL_DIR\bin" -ForegroundColor DarkCyan
+    Write-Host "       .\start-hbase.cmd" -ForegroundColor DarkCyan
+    Write-Host ""
+    Write-Host "  2. Open HBase Shell:" -ForegroundColor White
+    Write-Host "       .\hbase.cmd shell" -ForegroundColor DarkCyan
+    Write-Host ""
+    Write-Host "  3. HBase Master Web UI:" -ForegroundColor White
+    Write-Host "       http://localhost:16010" -ForegroundColor DarkCyan
+    Write-Host ""
+    Write-Host "  4. Quick test in HBase Shell:" -ForegroundColor White
+    Write-Host "       hbase> status" -ForegroundColor DarkCyan
+    Write-Host "       hbase> create 'test', 'cf'" -ForegroundColor DarkCyan
+    Write-Host "       hbase> put 'test', 'row1', 'cf:a', 'value1'" -ForegroundColor DarkCyan
+    Write-Host "       hbase> scan 'test'" -ForegroundColor DarkCyan
+    Write-Host "       hbase> exit" -ForegroundColor DarkCyan
+    Write-Host ""
+    Write-Host "  5. Stop HBase:" -ForegroundColor White
+    Write-Host "       .\stop-hbase.cmd" -ForegroundColor DarkCyan
 }
-
-Write-Host "       cd $INSTALL_DIR\bin" -ForegroundColor DarkCyan
-Write-Host "       .\start-hbase.cmd" -ForegroundColor DarkCyan
-Write-Host ""
-Write-Host "  4. Open HBase Shell:" -ForegroundColor White
-Write-Host "       .\hbase.cmd shell" -ForegroundColor DarkCyan
-Write-Host ""
-Write-Host "  5. HBase Master Web UI:" -ForegroundColor White
-Write-Host "       http://localhost:16010" -ForegroundColor DarkCyan
-Write-Host ""
-Write-Host "  6. Quick test in HBase Shell:" -ForegroundColor White
-Write-Host "       hbase> status" -ForegroundColor DarkCyan
-Write-Host "       hbase> create 'test', 'cf'" -ForegroundColor DarkCyan
-Write-Host "       hbase> put 'test', 'row1', 'cf:a', 'value1'" -ForegroundColor DarkCyan
-Write-Host "       hbase> scan 'test'" -ForegroundColor DarkCyan
-Write-Host "       hbase> exit" -ForegroundColor DarkCyan
-Write-Host ""
-Write-Host "  7. Stop HBase:" -ForegroundColor White
-Write-Host "       .\stop-hbase.cmd" -ForegroundColor DarkCyan
 Write-Host ""
 
 if (-not $allGood) {
@@ -1027,6 +1165,20 @@ if (-not $allGood) {
 }
 else {
     Write-Success "All checks passed. HBase is ready to use!"
+}
+
+# Cleanup prompt - delete only downloads, not the log
+if (Confirm-Continue "Delete temporary download files (archive, 7-Zip installer)?") {
+    $filesToClean = @(
+        "$TEMP_DIR\hbase-$HBASE_VERSION-bin.tar.gz",
+        "$TEMP_DIR\7z_installer.exe"
+    )
+    foreach ($f in $filesToClean) {
+        if (Test-Path $f) { Remove-Item $f -Force -ErrorAction SilentlyContinue }
+    }
+    if (Test-Path "$TEMP_DIR\hbase-extract") { Remove-Item "$TEMP_DIR\hbase-extract" -Recurse -Force -ErrorAction SilentlyContinue }
+    if (Test-Path "$TEMP_DIR\7z-extract")    { Remove-Item "$TEMP_DIR\7z-extract"    -Recurse -Force -ErrorAction SilentlyContinue }
+    Write-Success "Temp download files cleaned up (log file kept)"
 }
 
 Write-Host ""
