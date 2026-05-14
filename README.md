@@ -1,47 +1,81 @@
-# Big Data Scripts (Windows)
+<div align="center">
 
-PowerShell scripts to **install and configure Apache Hadoop, HBase, and Hive on Windows** with minimal manual steps. This repository is focused on repeatable, automated setup for local single‑node development and testing environments.
+# Big Data Scripts for Windows
 
-## What’s Included
+**Automated PowerShell installers for Apache Hadoop, HBase, and Hive on Windows — minimal manual setup, repeatable results.**
 
-| Script | Purpose |
+[![Stars](https://img.shields.io/github/stars/vanshrana369/big_data_scripts?style=for-the-badge&color=yellow)](https://github.com/vanshrana369/big_data_scripts/stargazers)
+[![Forks](https://img.shields.io/github/forks/vanshrana369/big_data_scripts?style=for-the-badge&color=blue)](https://github.com/vanshrana369/big_data_scripts/network/members)
+[![License](https://img.shields.io/github/license/vanshrana369/big_data_scripts?style=for-the-badge)](LICENSE)
+[![PowerShell](https://img.shields.io/badge/PowerShell-5.1+-5391FE?style=for-the-badge&logo=powershell&logoColor=white)](https://github.com/PowerShell/PowerShell)
+[![Windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
+
+</div>
+
+---
+
+## Overview
+
+This repo provides **Windows‑friendly automation** for setting up a local big‑data stack. It currently includes:
+
+- **Hadoop** (HDFS + YARN) single‑node install
+- **HBase** install and integration with Hadoop
+- **Hive** install and basic configuration on Hadoop
+
+---
+
+## Scripts
+
+| Script | What it does |
 | --- | --- |
-| `install-hadoop.ps1` | Automated Hadoop install and configuration on Windows |
-| `fix-hadoop.ps1` | Repairs common Hadoop setup issues (paths, configs) |
+| `install-hadoop.ps1` | Installs and configures Hadoop on Windows |
+| `fix-hadoop.ps1` | Repairs common Hadoop setup issues |
 | `fix-hadoop-permissions.ps1` | Fixes permissions for Hadoop directories |
-| `install-hbase.ps1` | Automated HBase install and integration with Hadoop |
-| `install-hive.ps1` | Automated Hive install and basic configuration |
+| `install-hbase.ps1` | Installs HBase and configures it to use Hadoop |
+| `install-hive.ps1` | Installs Hive and configures it for Hadoop |
+
+---
 
 ## Requirements
 
 - Windows 10/11
 - PowerShell 5.1+
 - Administrator privileges
-- Internet connection (for downloading binaries)
+- Internet connection (downloads binaries)
+
+---
 
 ## Quick Start
 
-1. **Open PowerShell as Administrator**
-2. Run the installer you need:
+> **Open PowerShell as Administrator**
 
 ```powershell
 # Hadoop
 Set-ExecutionPolicy Bypass -Scope Process -Force; .\install-hadoop.ps1
 
-# HBase
+# HBase (requires Hadoop)
 Set-ExecutionPolicy Bypass -Scope Process -Force; .\install-hbase.ps1
 
-# Hive
+# Hive (requires Hadoop)
 Set-ExecutionPolicy Bypass -Scope Process -Force; .\install-hive.ps1
 ```
 
-> Tip: If you only need to repair an existing Hadoop setup, use `fix-hadoop.ps1` or `fix-hadoop-permissions.ps1` instead of reinstalling.
+**Repair-only scripts** (if you already have Hadoop installed):
+
+```powershell
+.\fix-hadoop.ps1
+.\fix-hadoop-permissions.ps1
+```
+
+---
 
 ## Typical Flow
 
 1. Install **Hadoop**
 2. Install **HBase** (uses Hadoop)
 3. Install **Hive** (uses Hadoop)
+
+---
 
 ## After Installation (Hadoop)
 
@@ -58,6 +92,8 @@ Expected `jps` output includes:
 - `ResourceManager`
 - `NodeManager`
 
+---
+
 ## Troubleshooting
 
 - **Scripts won’t run**
@@ -69,19 +105,24 @@ Expected `jps` output includes:
   Open a **new** terminal window and re-check `JAVA_HOME`, `HADOOP_HOME`.
 
 - **Permission errors**
-  Run:
   ```powershell
   .\fix-hadoop-permissions.ps1
   ```
 
+---
+
 ## Notes
 
-- These scripts are intended for **local development/single-node setups**.
-- Always review scripts before running in production or on shared machines.
+- These scripts are intended for **local development/single‑node setups**.
+- Review scripts before running in production or on shared machines.
+
+---
 
 ## Contributing
 
 PRs and issues are welcome. If you test on a new Windows version or hit a bug, please open an issue with logs and steps to reproduce.
+
+---
 
 ## Author
 
